@@ -450,3 +450,148 @@ func Test_RecipientCohort_OnChain_NegativeControls_A3S2(t *testing.T) {
 	}
 	t.Logf("NEG(b) OK: R1 does not attribute R2's carrier — co-held disambiguation is clean across distinct keys")
 }
+
+// Test_RecipientCohort_OnChain_R3Rotation_A3S2 closes the R>2 generalization the 2-member test left
+// EXPECTED-BY-INSPECTION (and that the red-team flagged owed). It is the on-chain analog of A3
+// Strategy 1's TargetRotatesAcrossCohort (which ran R=3 in pure crypto): a cohort of THREE co-held
+// members (R1,R2,R3) where, for EACH member in turn, a carrier sealed to that member is attributed by
+// EXACTLY that member via the balance arm — and by NEITHER of the other two (balance unchanged, no
+// Incoming entry). This proves the balance-arm discovery + co-held disambiguation hold for R>2, not
+// just the pairwise R=2 case, on a real simulator through the real daemon_communication.go path.
+//
+// Same scope as the 2-member test: single-node sim / 0-conf, base-SCID plain ring>=4, cohort-birth
+// conceded (just register+fund the members). Distinct bn256 keys => attribution at the ring slot
+// (daemon_communication.go:861) can never collide across the three members — this RUNS that proof.
+func Test_RecipientCohort_OnChain_R3Rotation_A3S2(t *testing.T) {
+	globals.Arguments["--testnet"] = true
+	globals.Arguments["--simulator"] = true
+
+	walletapi.Initialize_LookupTable(1, 1<<17)
+
+	const ring = 8
+	const R = 3 // the cohort size under test (the R>2 generalization)
+
+	mkwallet := func(name, seedHex string) *walletapi.Wallet_Disk {
+		db := filepath.Join(os.TempDir(), "a3s2r3_"+name+".db")
+		os.Remove(db)
+		t.Cleanup(func() { os.Remove(db) })
+		seed, err := hex.DecodeString(seedHex)
+		if err != nil {
+			t.Fatalf("decode seed %s: %s", name, err)
+		}
+		w, err := walletapi.Create_Encrypted_Wallet(db, WALLET_PASSWORD, new(crypto.BNRed).SetBytes(seed))
+		if err != nil {
+			t.Fatalf("create wallet %s: %s", name, err)
+		}
+		return w
+	}
+
+	wgenesis := mkwallet("genesis", genesis_seed)
+	wsrc := mkwallet("src", wallets_seeds[0])
+	// The R=3 co-held cohort. Each is a DISTINCT registered wallet (what's shared in the full protocol
+	// is the registry receive-side key, not the wallet keypair — see the file header MODEL NOTE).
+	cohort := make([]*walletapi.Wallet_Disk, 0, R)
+	for i := 0; i < R; i++ {
+		cohort = append(cohort, mkwallet(fmt.Sprintf("rc%d", i), wallets_seeds[1+i]))
+	}
+	// Plain decoys to fill the ring.
+	var decoys []*walletapi.Wallet_Disk
+	for i := 0; i < ring && 1+R+i < len(wallets_seeds); i++ {
+		decoys = append(decoys, mkwallet(fmt.Sprintf("decoy%d", i), wallets_seeds[1+R+i]))
+	}
+
+	genesis_tx := transaction.Transaction{Transaction_Prefix: transaction.Transaction_Prefix{Version: 1, Value: 2012345}}
+	copy(genesis_tx.MinerAddress[:], wgenesis.GetAddress().PublicKey.EncodeCompressed())
+	config.Testnet.Genesis_Tx = fmt.Sprintf("%x", genesis_tx.Serialize())
+	config.Mainnet.Genesis_Tx = fmt.Sprintf("%x", genesis_tx.Serialize())
+	genesis_block := blockchain.Generate_Genesis_Block()
+	config.Testnet.Genesis_Block_Hash = genesis_block.GetHash()
+	config.Mainnet.Genesis_Block_Hash = genesis_block.GetHash()
+
+	chain, rpcserver, _ := simulator_chain_start()
+	defer simulator_chain_stop(chain, rpcserver)
+	globals.Arguments["--daemon-address"] = rpcport_test
+	go walletapi.Keep_Connectivity()
+
+	allToRegister := append([]*walletapi.Wallet_Disk{wsrc}, cohort...)
+	allToRegister = append(allToRegister, decoys...)
+	for _, w := range allToRegister {
+		if err := chain.Add_TX_To_Pool(w.GetRegistrationTX()); err != nil {
+			t.Fatalf("regtx: %s", err)
+		}
+	}
+	simulator_chain_mineblock(chain, wgenesis.GetAddress(), t)
+	for _, w := range append(allToRegister, wgenesis) {
+		w.SetDaemonAddress(rpcport)
+		w.SetOnlineMode()
+	}
+	for i := 0; i < 8; i++ {
+		simulator_chain_mineblock(chain, wsrc.GetAddress(), t)
+	}
+	syncSettled(t, wsrc, "src")
+	if bal, _ := wsrc.Get_Balance(); bal == 0 {
+		t.Fatalf("sender has zero balance after funding")
+	}
+	wsrc.SetRingSize(ring)
+
+	// ROTATE THE TARGET across all R=3 members: for each member, send a carrier to it, mine, and
+	// assert EXACTLY that member attributes it (balance +1) while EVERY other member does not.
+	for target := 0; target < R; target++ {
+		// snapshot every member's balance before this round
+		before := make([]uint64, R)
+		for i := range cohort {
+			syncSettled(t, cohort[i], fmt.Sprintf("rc%d pre[%d]", i, target))
+			before[i], _ = cohort[i].Get_Balance()
+		}
+
+		frame := make([]byte, 1200)
+		if _, err := rand.Read(frame); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := wsrc.TransferPayload0WithOptions(
+			[]rpc.Transfer{{Destination: cohort[target].GetAddress().String(), Amount: 1}},
+			ring, false, buildActionlessSCDATABodyA2(frame), 0, false, walletapi.TransferOptions{})
+		if err != nil {
+			t.Fatalf("R3 BUILD: carrier to member %d did not build: %s", target, err)
+		}
+		var dtx transaction.Transaction
+		if err := dtx.Deserialize(tx.Serialize()); err != nil {
+			t.Fatalf("R3 deserialize: %s", err)
+		}
+		txid := dtx.GetHash().String()
+		if err := chain.Add_TX_To_Pool(&dtx); err != nil {
+			t.Fatalf("R3 CONSENSUS: node REJECTED carrier to member %d: %s", target, err)
+		}
+		for i := 0; i < 5; i++ {
+			simulator_chain_mineblock(chain, wgenesis.GetAddress(), t)
+		}
+
+		// EXACTLY the targeted member attributes it (balance +1); every other member does not.
+		for i := range cohort {
+			syncSettled(t, cohort[i], fmt.Sprintf("rc%d post[%d]", i, target))
+			attributed, amt := attributesTX(cohort[i], txid)
+			after, _ := cohort[i].Get_Balance()
+			if i == target {
+				if !attributed || amt != 1 {
+					t.Fatalf("R3 FAIL: member %d (the target) did not attribute its carrier (attributed=%v amount=%d)", i, attributed, amt)
+				}
+				if after <= before[i] {
+					t.Fatalf("R3 FAIL: target member %d balance did not increase (%d -> %d)", i, before[i], after)
+				}
+			} else {
+				if attributed {
+					t.Fatalf("R3 FAIL: non-target member %d attributed a carrier addressed to member %d — disambiguation broke at R=3", i, target)
+				}
+				if after != before[i] {
+					t.Fatalf("R3 FAIL: non-target member %d balance changed (%d -> %d) — carrier touched the wrong member", i, before[i], after)
+				}
+			}
+		}
+		t.Logf("R3 round %d OK: carrier to member %d attributed by EXACTLY member %d; other %d members unchanged", target, target, target, R-1)
+	}
+
+	t.Logf("A3S2 R=3 PROVEN-RUN: target rotated across all %d co-held cohort members on-chain — each member "+
+		"attributes ONLY its own carrier via the balance arm, every other member disambiguates cleanly (balance "+
+		"unchanged, no Incoming entry). Closes the R>2 generalization (was EXPECTED-BY-INSPECTION). Scope: "+
+		"single-node sim / 0-conf, base-SCID plain ring>=4.", R)
+}
