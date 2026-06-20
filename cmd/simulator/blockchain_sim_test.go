@@ -19,6 +19,7 @@ package main
 import "io"
 import "os"
 import "fmt"
+import "net"
 import "time"
 import "testing"
 import "bytes"
@@ -62,15 +63,46 @@ Options:
   --rpc-bind=<127.0.0.1:9999>    daemon RPC listens on this ip:port
   `
 
-const rpcport_test = "127.0.0.1:26001"
+// rpcport_test is the daemon RPC bind for the sim. It was a fixed const ("127.0.0.1:26001"), which
+// made every test in the package share ONE port + ONE data dir — so running them back-to-back in one
+// process (or re-running in a saturated session) raced on a leaked RPC server / in-flight graviton
+// commit and flaked (~40-87% fail; A2 and A3S2 both inherit it). It is now a var that
+// simulator_chain_start rewrites to a FRESH ephemeral port per call, and tmpdirectory to a UNIQUE
+// dir per call, so each chain start is isolated. Callers read these vars AFTER calling
+// simulator_chain_start (to set --daemon-address / SetDaemonAddress), so they pick up the fresh
+// values unchanged — no call-site edits needed.
+var rpcport_test = "127.0.0.1:26001"
 
 var tmpdirectory = "/tmp/dsimulator"
+
+// simChainStartCounter makes each test's data dir unique within a process run.
+var simChainStartCounter int
+
+// freeTCPPort asks the OS for an unused localhost TCP port (bind :0, read back, release). Used to
+// give each simulator_chain_start its own RPC port so concurrent/sequential sim chains never collide
+// on a fixed port (the dominant cause of the sim-harness flakiness).
+func freeTCPPort() (string, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	defer l.Close()
+	return l.Addr().String(), nil
+}
 
 // start a chain in simulator mode
 func simulator_chain_start() (*blockchain.Blockchain, *derodrpc.RPCServer, map[string]interface{}) {
 	var err error
 	params := map[string]interface{}{}
 	params["--simulator"] = true
+
+	// Isolate this chain start: a fresh ephemeral RPC port + a unique on-disk data dir, so this sim
+	// chain never collides with another test's daemon/port/graviton state (the harness-race fix).
+	if port, perr := freeTCPPort(); perr == nil {
+		rpcport_test = port
+	}
+	tmpdirectory = filepath.Join(os.TempDir(), fmt.Sprintf("dsimulator_%d_%d", os.Getpid(), simChainStartCounter))
+	simChainStartCounter++
 
 	parser := &docopt.Parser{
 		HelpHandler:  docopt.PrintHelpOnly,
@@ -131,8 +163,16 @@ func simulator_chain_mineblock(chain *blockchain.Blockchain, miner_address rpc.A
 }
 
 func simulator_chain_stop(chain *blockchain.Blockchain, rpcserver *derodrpc.RPCServer) {
-	rpcserver.RPCServer_Stop()
-	chain.Shutdown() // shutdown chain subsysem
+	if rpcserver != nil {
+		rpcserver.RPCServer_Stop()
+	}
+	if chain != nil {
+		chain.Shutdown() // shutdown chain subsysem
+	}
+	// Give the RPC server a beat to release its listener, then remove this run's unique data dir so
+	// stale graviton snapshots can't bleed into a later test (part of the harness-isolation fix).
+	time.Sleep(200 * time.Millisecond)
+	os.RemoveAll(tmpdirectory)
 }
 
 // this will test that the keys are placed properly and thus can be decoded by recievers
