@@ -58,11 +58,56 @@ type RingPreference struct {
 	Strict bool
 }
 
+// PinnedSender is an opt-in, additive primitive that lets the sender deliberately
+// name WHICH ring slot the receiver-decryptable attribution byte points at. The engine
+// exposes only the mechanism: it resolves Address to its publickeylist slot and writes
+// that slot. ALL policy (which member, when, with what disclosure) lives in the
+// wallet layer. A nil *PinnedSender reproduces today's behavior exactly.
+//
+// Safety: this is gated by the same export scrub as every other unverified
+// attribution (ring > 2): entry.Sender is blanked and the leading slot byte is zeroed
+// in the exported copy, so a sender-chosen attribution cannot be republished as a
+// verified accusation. Resolution is purely mechanical — the only rejection is "the
+// address is not a member of this ring" (no slot exists for it).
+type PinnedSender struct {
+	// Address is the base address whose ring slot the attribution byte should name.
+	// Any ring member is valid (self, receiver, or any decoy). A non-member is a hard
+	// build error; there is no silent fallback.
+	Address string
+}
+
 // TransferOptions carries opt-in, additive transfer privacy knobs. The zero value
 // reproduces today's behavior exactly (honest attribution, random ring selection).
 type TransferOptions struct {
 	Attribution AttributionMode // zero value = AttributionHonest
 	Ring        *RingPreference // nil = today's random ring selection
+	// PinnedSender is an opt-in primitive: when non-nil, the sender-attribution byte
+	// names the ring slot of PinnedSender.Address (any ring member). nil = off (today's
+	// behavior). It is a SEPARATE field, not a third AttributionMode, so the attribution-
+	// rotation engine that drives the enum is structurally unable to reach it.
+	PinnedSender *PinnedSender
+}
+
+// resolvePinnedSenderIndex returns the PUBLICKEYLIST SLOT index whose key matches the
+// pinned-sender address. The decode side reads payload[0] DIRECTLY as
+// Publickeylist[payload[0]] (daemon_communication.go), so the returned value is the
+// byte written verbatim — it must NOT be re-indexed through witness_index.
+//
+// Resolution is purely mechanical: any ring member is a valid target. The only failures
+// are an unparseable address or one that is not a member of this ring (no slot exists
+// for it). There is no policy filter and no silent fallback.
+func resolvePinnedSenderIndex(pin *PinnedSender, publickeylist []*bn256.G1) (int, error) {
+	addr, err := rpc.NewAddress(pin.Address)
+	if err != nil {
+		return 0, fmt.Errorf("pinned sender not a valid address: %s", pin.Address)
+	}
+	targetKey := addr.PublicKey.G1()
+	for idx, member := range publickeylist {
+		if member.String() == targetKey.String() {
+			return idx, nil
+		}
+	}
+	return 0, fmt.Errorf("pinned sender is not a ring member: %s", pin.Address)
 }
 
 // generate proof  etc
@@ -245,6 +290,26 @@ rebuild_tx:
 					// Pointing attribution at one reduces the receiver to 1-of-N ring anonymity.
 					decoyPos := 2 + crand.Intn(len(witness_index)-2)
 					attrIndex = witness_index[decoyPos]
+				}
+				// Pinned-sender primitive (opt-in, nil = off): when set, the sender deliberately
+				// names which ring slot the attribution byte points at. resolvePinnedSenderIndex
+				// returns a PUBLICKEYLIST SLOT, and the decode side reads payload[0] DIRECTLY
+				// as Publickeylist[payload[0]] — so write the slot verbatim. Do NOT wrap it in
+				// witness_index[]; that would double-index and name the wrong ring member.
+				//
+				// The wallet layer (TransferPayload0WithOptions) pre-validates the target and
+				// FORCES it into the ring, so for any caller using that entrypoint the target
+				// is a guaranteed member and resolvePinnedSenderIndex cannot fail. The panic below
+				// is therefore a can't-happen invariant guard (defense in depth for a direct
+				// buildTransaction caller that skipped wallet validation), matching the other
+				// invariant panics in this function (max_bits, ring>=512) — NOT input
+				// validation. Routine input errors are returned cleanly by the wallet layer.
+				if opts.PinnedSender != nil {
+					idx, err := resolvePinnedSenderIndex(opts.PinnedSender, publickeylist)
+					if err != nil {
+						panic(err)
+					}
+					attrIndex = idx
 				}
 				payload := append([]byte{byte(uint(attrIndex))}, data...)
 				//fmt.Printf("buulding shared_key %x  index of receiver %d\n",shared_key,i)

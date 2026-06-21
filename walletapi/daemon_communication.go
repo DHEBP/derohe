@@ -900,6 +900,14 @@ func (w *Wallet_Memory) synchistory_block(scid crypto.Hash, topo int64) (err err
 							//fmt.Printf("Anon Ring Member in TX %s\n", bl.Tx_hashes[i].String())
 							ring_member = true
 						case previous_balance > changed_balance: // we generated this tx
+							// SENDER-SIDE bookkeeping branch (we are the spender). entry.Sender is hardcoded
+							// below to OUR OWN key, and the full RPCPayload (incl. the sender-chosen
+							// attribution byte[0]) is intentionally kept unscrubbed in entry.Data — it is the
+							// sender's own record of what they named, never a receiver-facing attribution.
+							// The export scrub (entry.Sender blanked + byte[0] zeroed for ring > 2) lives
+							// ONLY on the receiver/incoming branch (previous_balance < changed_balance) and is
+							// load-bearing there. DO NOT merge these two branches without re-routing the
+							// receiver path through the scrub, or a sender-named third party would leak to the receiver.
 							entry.Burn = tx.Payloads[t].BurnValue
 							entry.Amount = previous_balance - changed_balance - (tx.Payloads[t].Statement.Fees)
 							entry.Fees = tx.Payloads[t].Statement.Fees

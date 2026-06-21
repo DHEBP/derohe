@@ -403,6 +403,68 @@ func (w *Wallet_Memory) TransferPayload0WithOptions(transfers []rpc.Transfer, ri
 		deduplicator[receiver_without_payment_id.String()] = true
 		deduplicator[w.GetAddress().String()] = true
 
+		// Pinned-sender pre-validation + ring injection (opt-in, nil = off).
+		//
+		// The pinned-sender primitive names the ring slot of opts.PinnedSender.Address. The
+		// engine (transaction_build.go) can only name a slot that EXISTS, so the target must
+		// be a member of THIS ring. The ring's decoys are drawn randomly below, so for a third
+		// party / decoy target we must GUARANTEE membership by forcing the address in here
+		// (the wallet cannot know the random draw, so it cannot rely on chance). Self and
+		// receiver are already at slots 0/1 and need no injection.
+		//
+		// This validation lives in the wallet layer (where a clean typed `err` can be
+		// returned) precisely so a bad target fails LOUD but RECOVERABLY — never reaching
+		// the engine's panic-on-non-member fatal guard. The engine panic remains only as a
+		// can't-happen invariant (defense in depth), matching the other invariant panics.
+		var pinned_member string // non-empty = a third-party target to force into the ring
+		if opts.PinnedSender != nil {
+			faddr, ferr := rpc.NewAddress(opts.PinnedSender.Address)
+			if ferr != nil {
+				err = fmt.Errorf("pinned sender not a valid address: %s", opts.PinnedSender.Address)
+				return
+			}
+			fbase := faddr.BaseAddress().String()
+			switch fbase {
+			case w.GetAddress().String(), receiver_without_payment_id.String():
+				// self or receiver: already a guaranteed ring member (slots 0/1). No-op.
+			default:
+				if ringsize == 2 {
+					// ring 2 has only sender + receiver; no decoy slot exists for a third party.
+					err = fmt.Errorf("pinned sender is not a ring member: at ring size 2 only the sender or receiver can be named, not %s", opts.PinnedSender.Address)
+					return
+				}
+				// registration check on the base tree (the tree consensus verifies against),
+				// so an unregistered target fails here, not after the user has signed.
+				if _, _, _, _, e := w.GetEncryptedBalanceAtTopoHeight(crypto.ZEROHASH, -1, fbase); e != nil {
+					err = fmt.Errorf("pinned sender is not registered: %s", opts.PinnedSender.Address)
+					return
+				}
+				pinned_member = fbase
+			}
+		}
+
+		// Force the pinned-sender target into the ring first, so it is a GUARANTEED member.
+		if pinned_member != "" && ringsize != 2 {
+			if _, collision := deduplicator[pinned_member]; !collision {
+				deduplicator[pinned_member] = true
+				var fmem *rpc.Address
+				var febal *crypto.ElGamal
+				bits_needed[len(ring_balances)], _, _, febal, err = w.GetEncryptedBalanceAtTopoHeight(transfers[t].SCID, -1, pinned_member)
+				if err != nil {
+					err = fmt.Errorf("pinned sender unregistered on transfer scid: %s", pinned_member)
+					return
+				}
+				if fmem, err = rpc.NewAddress(pinned_member); err != nil {
+					return
+				}
+				ring_balances = append(ring_balances, febal.Serialize())
+				ring = append(ring, fmem.PublicKey.G1())
+				if len(ring_balances) == int(ringsize) { // pinned-sender target filled the last slot
+					goto ring_members_collected
+				}
+			}
+		}
+
 		for ringsize != 2 {
 			// curated preferred decoys (if any) go first; random members top up. With no
 			// RingPreference this returns exactly Random_ring_members(transfers[t].SCID).
