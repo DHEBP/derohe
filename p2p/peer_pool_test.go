@@ -9,42 +9,42 @@ func TestPeerScore(t *testing.T) {
 	now := uint64(1_000_000_000) // fixed epoch for deterministic tests
 
 	tests := []struct {
-		name         string
-		peer         *Peer
-		now          uint64
-		expected     float64
-		tolerance    float64
+		name      string
+		peer      *Peer
+		now       uint64
+		expected  float64
+		tolerance float64
 	}{
 		{
-			name:     "zero peer — all fields zero",
-			peer:     &Peer{},
-			now:      now,
-			expected: 0.0,
+			name:      "zero peer — all fields zero",
+			peer:      &Peer{},
+			now:       now,
+			expected:  0.0,
 			tolerance: 0.01,
 		},
 		{
-			name: "5 successes, no latency data",
-			peer: &Peer{SuccessCount: 5},
-			now:  now,
-			expected: 50.0,
+			name:      "5 successes, no latency data",
+			peer:      &Peer{SuccessCount: 5},
+			now:       now,
+			expected:  5.0,
 			tolerance: 0.01,
 		},
 		{
-			name: "3 failures only",
-			peer: &Peer{FailCount: 3},
-			now:  now,
-			expected: -150.0,
+			name:      "3 failures only",
+			peer:      &Peer{FailCount: 3},
+			now:       now,
+			expected:  -150.0,
 			tolerance: 0.01,
 		},
 		{
 			name: "5 successes, 10ms latency",
 			peer: &Peer{
 				SuccessCount: 5,
-				LastLatency:  10_000_000,  // 10ms in ns
-				LastMeasured: now - 60,    // 1 min ago
+				LastLatency:  10_000_000, // 10ms in ns
+				LastMeasured: now - 60,   // 1 min ago
 			},
-			now:      now,
-			expected: 50.0 + 10000.0/11.0, // ≈ 959.09
+			now:       now,
+			expected:  5.0 + 10000.0/11.0, // ≈ 914.09
 			tolerance: 0.01,
 		},
 		{
@@ -54,8 +54,8 @@ func TestPeerScore(t *testing.T) {
 				LastLatency:  100_000_000, // 100ms in ns
 				LastMeasured: now - 60,
 			},
-			now:      now,
-			expected: 50.0 + 10000.0/101.0, // ≈ 149.01
+			now:       now,
+			expected:  5.0 + 10000.0/101.0, // ≈ 104.01
 			tolerance: 0.01,
 		},
 		{
@@ -65,8 +65,8 @@ func TestPeerScore(t *testing.T) {
 				LastLatency:  200_000_000, // 200ms in ns
 				LastMeasured: now - 60,
 			},
-			now:      now,
-			expected: 50.0 + 10000.0/201.0, // ≈ 99.75
+			now:       now,
+			expected:  5.0 + 10000.0/201.0, // ≈ 54.75
 			tolerance: 0.01,
 		},
 		{
@@ -76,8 +76,8 @@ func TestPeerScore(t *testing.T) {
 				LastLatency:  10_000_000,
 				LastMeasured: now - 25*3600, // 25 hours ago
 			},
-			now:      now,
-			expected: 50.0, // no latency bonus (age >= 24h)
+			now:       now,
+			expected:  5.0, // no latency bonus (age >= 24h)
 			tolerance: 0.01,
 		},
 		{
@@ -87,8 +87,8 @@ func TestPeerScore(t *testing.T) {
 				LastLatency:  10_000_000,
 				LastMeasured: now - 24*3600, // exactly 24 hours
 			},
-			now:      now,
-			expected: 50.0, // no bonus: age < 86400 is false
+			now:       now,
+			expected:  5.0, // no bonus: age < 86400 is false
 			tolerance: 0.01,
 		},
 		{
@@ -98,8 +98,8 @@ func TestPeerScore(t *testing.T) {
 				LastLatency:  10_000_000,
 				LastMeasured: now - (24*3600 - 1), // 23h59m59s ago
 			},
-			now:      now,
-			expected: 50.0 + 10000.0/11.0, // ≈ 959.09
+			now:       now,
+			expected:  5.0 + 10000.0/11.0, // ≈ 914.09
 			tolerance: 0.01,
 		},
 		{
@@ -109,8 +109,8 @@ func TestPeerScore(t *testing.T) {
 				LastLatency:  1_000_000, // 1ms in ns
 				LastMeasured: now - 60,
 			},
-			now:      now,
-			expected: 50.0 + 5000.0, // 10000/(1+1) = 5000, total = 5050.0
+			now:       now,
+			expected:  5.0 + 5000.0, // 10000/(1+1) = 5000, total = 5005.0
 			tolerance: 0.01,
 		},
 		{
@@ -121,8 +121,8 @@ func TestPeerScore(t *testing.T) {
 				LastLatency:  10_000_000,
 				LastMeasured: now - 60,
 			},
-			now:      now,
-			expected: -240.0 + 10000.0/11.0, // -240 + 909.09 = 669.09
+			now:       now,
+			expected:  -249.0 + 10000.0/11.0, // -249 + 909.09 = 660.09
 			tolerance: 0.01,
 		},
 		{
@@ -132,8 +132,8 @@ func TestPeerScore(t *testing.T) {
 				LastLatency:  0,
 				LastMeasured: now - 60,
 			},
-			now:      now,
-			expected: 50.0, // no bonus: LastLatency == 0 skips block
+			now:       now,
+			expected:  5.0, // no bonus: LastLatency == 0 skips block
 			tolerance: 0.01,
 		},
 	}
@@ -154,7 +154,7 @@ func TestPeerScoreRelativeOrdering(t *testing.T) {
 
 	fastPeer := &Peer{
 		SuccessCount: 5,
-		LastLatency:  10_000_000,  // 10ms
+		LastLatency:  10_000_000, // 10ms
 		LastMeasured: now - 60,
 	}
 	slowPeer := &Peer{
@@ -195,7 +195,7 @@ func TestPeerScoreRelativeOrdering(t *testing.T) {
 
 	// also verify absolute values are sensible
 	if fastPeerScore := peerScore(fastPeer, now); fastPeerScore < 900 {
-		t.Errorf("fast peer (10ms) should score > 900, got %.2f", fastPeerScore)
+		t.Errorf("fast peer (10ms) should score >= 900, got %.2f", fastPeerScore)
 	}
 	if greyPeerScore := peerScore(greyPeer, now); greyPeerScore != 0.0 {
 		t.Errorf("grey peer should score 0.0, got %.2f", greyPeerScore)

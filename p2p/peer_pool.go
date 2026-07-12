@@ -58,7 +58,7 @@ type Peer struct {
 	ConnectAfter    uint64 `json:"connectafter"`    // we should connect when the following timestamp passes
 	BlacklistBefore uint64 `json:"blacklistbefore"` // peer blacklisted till epoch , priority nodes are never blacklisted, 0 if not blacklist
 	GoodCount       uint64 `json:"goodcount"`       // how many times peer has been shared with us
-	SuccessCount    uint64 `json:"successcount"`    // outbound connection successes (for scoring)
+	SuccessCount    uint64 `json:"successcount"`    // successful handshakes, in or out (for scoring); effectively 0 or 1 — peer map evicts on disconnect
 	LastLatency     int64  `json:"lastlatency"`     // nanoseconds, from rtt_micro
 	LastTopoHeight  int64  `json:"lasttopoheight"`  // peer's topo height at measurement
 	LastMeasured    uint64 `json:"lastmeasured"`    // epoch seconds when latency captured
@@ -206,13 +206,13 @@ func Peer_SetSuccess(address string) {
 	}
 	peer_mutex.Lock()
 	defer peer_mutex.Unlock()
-		p.FailCount = 0 //  fail count is zero again
-		p.ConnectAfter = 0
-		p.Whitelist = true
-		p.LastConnected = uint64(time.Now().UTC().Unix()) // set time when last connected
-		p.SuccessCount++
+	p.FailCount = 0 //  fail count is zero again
+	p.ConnectAfter = 0
+	p.Whitelist = true
+	p.LastConnected = uint64(time.Now().UTC().Unix()) // set time when last connected
+	p.SuccessCount++
 
-		// logger.Infof("Setting peer as white listed")
+	// logger.Infof("Setting peer as white listed")
 }
 
 // captures live latency/topoheight from the ping path, not from handshake
@@ -230,9 +230,11 @@ func Peer_UpdateLatency(address string, latencyNs int64, topoHeight int64) {
 }
 
 // computes a score for a peer: success/fail history + latency bonus
+// SuccessCount is effectively 0 or 1 (peer map evicts on disconnect), so it contributes
+// linearly at weight 1, not a large multiplier. The latency bonus drives selection.
 // latency bonus decays to zero after 24 hours
 func peerScore(p *Peer, now uint64) float64 {
-	score := float64(p.SuccessCount*10) - float64(p.FailCount*50)
+	score := float64(p.SuccessCount) - float64(p.FailCount*50)
 
 	if p.LastMeasured > 0 && p.LastLatency > 0 {
 		age := now - p.LastMeasured
@@ -274,26 +276,6 @@ func Peer_Delete(p *Peer) {
 	delete(peer_map, ParseIPNoError(p.Address))
 }
 
-func formatAge(lastMeasured uint64) string {
-	if lastMeasured == 0 {
-		return "-"
-	}
-	age := time.Now().UTC().Unix() - int64(lastMeasured)
-	if age < 0 {
-		return "now"
-	}
-	switch {
-	case age < 60:
-		return fmt.Sprintf("%ds ago", age)
-	case age < 3600:
-		return fmt.Sprintf("%dm ago", age/60)
-	case age < 86400:
-		return fmt.Sprintf("%dh ago", age/3600)
-	default:
-		return fmt.Sprintf("%dd ago", age/86400)
-	}
-}
-
 func printLatency(p *Peer) string {
 	if p.LastLatency <= 0 {
 		return "-"
@@ -326,12 +308,28 @@ func PeerList_Print() {
 		if IsAddressConnected(ParseIPNoError(list[i].Address)) {
 			connected = "ACTIVE"
 		}
+		ageStr := "-"
+		if list[i].LastMeasured > 0 {
+			age := time.Now().UTC().Unix() - int64(list[i].LastMeasured)
+			switch {
+			case age < 0:
+				ageStr = "now"
+			case age < 60:
+				ageStr = fmt.Sprintf("%ds ago", age)
+			case age < 3600:
+				ageStr = fmt.Sprintf("%dm ago", age/60)
+			case age < 86400:
+				ageStr = fmt.Sprintf("%dh ago", age/3600)
+			default:
+				ageStr = fmt.Sprintf("%dd ago", age/86400)
+			}
+		}
 		fmt.Printf("%-22s %-6s %4d %5d %4d %8s %8s\n",
 			list[i].Address, connected,
 			list[i].GoodCount, list[i].FailCount,
 			list[i].SuccessCount,
 			printLatency(list[i]),
-			formatAge(list[i].LastMeasured))
+			ageStr)
 	}
 
 	fmt.Printf("\nWhitelist size %d\n", len(peer_map)-greycount)
