@@ -1062,16 +1062,18 @@ func (w *Wallet_Memory) synchistory_block(scid crypto.Hash, topo int64) (err err
 								//fmt.Printf("decoding encrypted payload %x\n",tx.Payloads[t].RPCPayload)
 								crypto.EncryptDecryptUserData(crypto.Keccak256(shared_key[:], w.GetAddress().PublicKey.EncodeCompressed()), tx.Payloads[t].RPCPayload)
 								//fmt.Printf("decoded plaintext payload %x\n",tx.Payloads[t].RPCPayload)
-								sender_idx := uint(tx.Payloads[t].RPCPayload[0])
-								// if ring size is 2, the other party is the sender so mark it so
+								// Attribution is honest only at ring size 2, where the other ring
+								// member is necessarily the sender and nothing is being claimed.
+								// Above ring 2 the leading payload byte is sender-chosen, unbound
+								// by the proof and never read by consensus, so it is a claim and
+								// not a fact — and Proof.Parity binds only its low bit, which the
+								// receiver already knows from its own slot. Leave Sender empty
+								// rather than hand a caller a name it cannot check.
 								if uint(tx.Payloads[t].Statement.RingSize) == 2 {
-									sender_idx = 0
+									sender_idx := uint(0)
 									if j == 0 {
 										sender_idx = 1
 									}
-								}
-
-								if sender_idx < uint(tx.Payloads[t].Statement.RingSize) { // off-by-one fix: valid indices are 0..RingSize-1
 									addr := rpc.NewAddressFromKeys((*crypto.Point)(tx.Payloads[t].Statement.Publickeylist[sender_idx]))
 									addr.Mainnet = w.GetNetwork()
 									entry.Sender = addr.String()
@@ -1104,16 +1106,18 @@ func (w *Wallet_Memory) synchistory_block(scid crypto.Hash, topo int64) (err err
 
 								crypto.EncryptDecryptUserData(crypto.Keccak256(shared_key[:], w.GetAddress().PublicKey.EncodeCompressed()), payload)
 
-								sender_idx := uint(payload[0])
-								// if ring size is 2, the other party is the sender so mark it so
+								// Attribution is honest only at ring size 2, where the other ring
+								// member is necessarily the sender and nothing is being claimed.
+								// Above ring 2 the leading payload byte is sender-chosen, unbound
+								// by the proof and never read by consensus, so it is a claim and
+								// not a fact — and Proof.Parity binds only its low bit, which the
+								// receiver already knows from its own slot. Leave Sender empty
+								// rather than hand a caller a name it cannot check.
 								if uint(tx.Payloads[t].Statement.RingSize) == 2 {
-									sender_idx = 0
+									sender_idx := uint(0)
 									if j == 0 {
 										sender_idx = 1
 									}
-								}
-
-								if sender_idx < uint(tx.Payloads[t].Statement.RingSize) { // off-by-one fix: valid indices are 0..RingSize-1
 									addr := rpc.NewAddressFromKeys((*crypto.Point)(tx.Payloads[t].Statement.Publickeylist[sender_idx]))
 									addr.Mainnet = w.GetNetwork()
 									entry.Sender = addr.String()
